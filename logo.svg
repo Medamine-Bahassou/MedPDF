@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EF5350"/>
+      <stop offset="1" stop-color="#B71C1C"/>
+    </linearGradient>
+  </defs>
+  <rect width="108" height="108" fill="url(#bg)"/>
+  <!-- page -->
+  <path d="M38,26 H62 L74,38 V80 Q74,84 70,84 H38 Q34,84 34,80 V30 Q34,26 38,26 Z" fill="#FFFFFF"/>
+  <!-- folded corner -->
+  <path d="M62,26 V34 Q62,38 66,38 H74 Z" fill="#FFCDD2"/>
+  <!-- bookmark ribbon -->
+  <path d="M42,26 H52 V43 L47,39 L42,43 Z" fill="#FFB300"/>
+  <!-- text lines -->
+  <path d="M41,50 H67 V53 H41 Z M41,57 H67 V60 H41 Z M41,64 H67 V67 H41 Z M41,71 H58 V74 H41 Z" fill="#E57373"/>
+</svg>
