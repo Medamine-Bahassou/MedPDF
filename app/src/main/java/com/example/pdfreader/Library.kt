@@ -222,6 +222,7 @@ class Settings(context: Context) {
     var brightness by pref(-1f) // -1 = system
     var sort by pref(0)
     var grid by pref(true) // library as cards instead of a list
+    var columns by pref(0) // cards per row set by pinching; 0 = fit to screen width
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> pref(default: T) = object : ReadWriteProperty<Any?, T> {

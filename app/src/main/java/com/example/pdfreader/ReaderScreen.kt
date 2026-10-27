@@ -117,6 +117,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -275,7 +276,9 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
     var searching by remember { mutableStateOf(false) }
     val hits = remember { mutableStateListOf<Hit>() }
     var hitIndex by remember { mutableIntStateOf(-1) }
-    var searchBarBottom by remember { mutableIntStateOf(0) } // px from the top of the screen
+    // Bar edges in px from the screen edges, measured while visible, so pages can be laid out clear of them.
+    var topInset by remember { mutableIntStateOf(0) }
+    var bottomInset by remember { mutableIntStateOf(0) }
 
     // One scroll state per mode, created at the current page so switching modes keeps your place.
     val listState = remember(settings.paged) { LazyListState(page) }
@@ -332,8 +335,9 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
     val bookmarked = library.get(uri)?.bookmarks?.any { it.page == page } == true
 
     Box(Modifier.fillMaxSize().background(themeBackgrounds[settings.theme])) {
-        val contentTop = if (searching) with(LocalDensity.current) { searchBarBottom.toDp() } else 0.dp
-        BoxWithConstraints(Modifier.fillMaxSize().padding(top = contentTop).clipToBounds()) {
+        val topBar = with(LocalDensity.current) { topInset.toDp() }
+        val bottomBar = with(LocalDensity.current) { bottomInset.toDp() }
+        BoxWithConstraints(Modifier.fillMaxSize().clipToBounds()) {
             val width = constraints.maxWidth
             val height = constraints.maxHeight
             // ponytail: two render resolutions (1x, 2x); add more steps if users zoom to 5x often.
@@ -394,7 +398,15 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
             ) {
                 if (settings.paged) {
                     HorizontalPager(pagerState, Modifier.fillMaxSize(), userScrollEnabled = scale == 1f, beyondViewportPageCount = 1) { i ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        // Pages mode: fit the page between the bars while they're shown.
+                        val barsShown = showUi || searching
+                        Box(
+                            Modifier.fillMaxSize().padding(
+                                top = if (barsShown) topBar else 0.dp,
+                                bottom = if (showUi) bottomBar else 0.dp,
+                            ),
+                            contentAlignment = Alignment.Center,
+                        ) {
                             pageView(i, Modifier.fillMaxWidth())
                         }
                     }
@@ -402,7 +414,9 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 4.dp),
+                        // Scroll mode: padding (not a smaller viewport) so toggling the bars never shifts the page,
+                        // while jumps and the first/last page still land clear of the bars.
+                        contentPadding = PaddingValues(top = topBar + 4.dp, bottom = bottomBar + 4.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         items(doc.pageCount) { i -> pageView(i, Modifier.fillMaxWidth()) }
@@ -416,11 +430,14 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
             Surface(tonalElevation = 3.dp, shadowElevation = 3.dp) {
                 Column(Modifier.statusBarsPadding()) {
                     if (searching) {
-                        SearchBar(doc, hits, hitIndex, onBarBottom = { searchBarBottom = it }, onIndex = { hitIndex = it; hits.getOrNull(it)?.let(::goToHit) }, onClose = {
+                        SearchBar(doc, hits, hitIndex, onBarBottom = { topInset = it }, onIndex = { hitIndex = it; hits.getOrNull(it)?.let(::goToHit) }, onClose = {
                             searching = false; hits.clear(); hitIndex = -1
                         })
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.onGloballyPositioned { topInset = it.boundsInRoot().bottom.roundToInt() },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                             Text(book.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                             if (textApi) IconButton(onClick = { searching = true }) { Icon(Icons.Default.Search, "Search") }
@@ -451,7 +468,7 @@ fun ReaderScreen(uri: String, onBack: () -> Unit) {
 
         // Bottom bar: page slider
         AnimatedVisibility(showUi, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            Surface(tonalElevation = 3.dp, shadowElevation = 3.dp) {
+            Surface(Modifier.onSizeChanged { bottomInset = it.height }, tonalElevation = 3.dp, shadowElevation = 3.dp) {
                 Column(Modifier.navigationBarsPadding().padding(horizontal = 8.dp)) {
                     var dragging by remember { mutableStateOf<Float?>(null) }
                     Row(verticalAlignment = Alignment.CenterVertically) {

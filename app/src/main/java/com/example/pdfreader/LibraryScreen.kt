@@ -13,6 +13,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +28,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -82,6 +88,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -90,10 +97,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.launch
@@ -202,7 +212,7 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                         if (q != null) {
                             TextField(q, { query = it }, placeholder = { Text("Search titles") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                         } else {
-                            Text(sectionLabel(section))
+                            Text(sectionLabel(section), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     },
                     navigationIcon = {
@@ -211,9 +221,6 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                     },
                     actions = {
                         if (query == null) IconButton(onClick = { query = "" }) { Icon(Icons.Default.Search, "Search") }
-                        IconButton(onClick = { scope.launch { library.scan() } }, enabled = access && !library.scanning) {
-                            Icon(Icons.Default.Refresh, "Rescan device")
-                        }
                         IconButton(onClick = { settings.grid = !settings.grid }) {
                             if (settings.grid) Icon(Icons.AutoMirrored.Filled.ViewList, "List view")
                             else Icon(Icons.Default.GridView, "Card view")
@@ -230,9 +237,21 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                                 }
                             }
                         }
-                        if (section.startsWith("col:")) {
-                            IconButton(onClick = { library.removeCollection(section.removePrefix("col:")); section = "all" }) {
-                                Icon(Icons.Default.Delete, "Delete collection")
+                        var moreMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { moreMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
+                            DropdownMenu(moreMenu, onDismissRequest = { moreMenu = false }) {
+                                DropdownMenuItem(
+                                    { Text("Rescan device") },
+                                    onClick = { moreMenu = false; scope.launch { library.scan() } },
+                                    leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                                    enabled = access && !library.scanning,
+                                )
+                                if (section.startsWith("col:")) DropdownMenuItem(
+                                    { Text("Delete collection") },
+                                    onClick = { moreMenu = false; library.removeCollection(section.removePrefix("col:")); section = "all" },
+                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                )
                             }
                         }
                     },
@@ -269,14 +288,7 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                     if (shown.isEmpty()) {
                         EmptyState(section, access, library.scanning, onAddFiles = { pickFiles.launch(arrayOf("application/pdf")) })
                     } else if (settings.grid) {
-                        LazyVerticalGrid(
-                            columns = CardColumns,
-                            contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 88.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            items(shown, key = { it.uri }) { book -> BookCard(book, onOpen = { onOpen(book.uri) }) }
-                        }
+                        CardGrid(shown, settings, onOpen)
                     } else {
                         LazyColumn(contentPadding = PaddingValues(bottom = 88.dp)) {
                             items(shown, key = { it.uri }) { book -> BookRow(book, onOpen = { onOpen(book.uri) }) }
@@ -307,12 +319,47 @@ private fun matches(book: Book, section: String) = when (section) {
 private fun sectionLabel(key: String) =
     sections.firstOrNull { it.key == key }?.label ?: key.removePrefix("col:")
 
-/** Card grid columns: as many 140dp cards as fit, but never fewer than 2 or more than 5 per row. */
-private object CardColumns : GridCells {
-    override fun Density.calculateCrossAxisCellSizes(availableSize: Int, spacing: Int): List<Int> {
-        val count = ((availableSize + spacing) / (140.dp.roundToPx() + spacing)).coerceIn(2, 5)
-        val usable = availableSize - spacing * (count - 1)
-        return List(count) { usable / count + if (it < usable % count) 1 else 0 }
+/**
+ * Library as cards. Pinch out for fewer, bigger cards; pinch in for more (2–5 per row).
+ * Until the user pinches, the count follows the screen width (~140dp per card).
+ */
+@Composable
+private fun CardGrid(books: List<Book>, settings: Settings, onOpen: (String) -> Unit) {
+    BoxWithConstraints {
+        val auto = ((maxWidth - 12.dp) / 152.dp).toInt().coerceIn(2, 5)
+        val columns = settings.columns.takeIf { it in 2..5 } ?: auto
+        val current by rememberUpdatedState(columns)
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 88.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var zoom = 1f
+                    do {
+                        // Initial pass: take two-finger gestures before the grid scrolls.
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.size > 1) {
+                            zoom *= event.calculateZoom()
+                            event.changes.forEach { it.consume() }
+                            val step = when {
+                                zoom > 1.3f -> -1
+                                zoom < 0.77f -> 1
+                                else -> 0
+                            }
+                            if (step != 0) {
+                                settings.columns = (current + step).coerceIn(2, 5)
+                                zoom = 1f
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            },
+        ) {
+            items(books, key = { it.uri }) { book -> BookCard(book, onOpen = { onOpen(book.uri) }) }
+        }
     }
 }
 
@@ -321,7 +368,7 @@ private fun BookCover(book: Book, modifier: Modifier) {
     val library = LocalContext.current.app.library
     val cover by produceState<Bitmap?>(null, book.uri) { value = library.cover(book.uri) }
     Box(modifier.background(Color.LightGray)) {
-        cover?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        cover?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop, alignment = Alignment.TopCenter) }
     }
 }
 
@@ -351,30 +398,71 @@ private fun BookRow(book: Book, onOpen: () -> Unit) {
             }
         }
         FavoriteButton(book)
-        BookMenu(book)
+        var menu by remember { mutableStateOf(false) }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
+            BookMenu(book, menu, onExpandedChange = { menu = it })
+        }
     }
 }
 
+/** Tap opens; long-press (or ⋮ on wide cards) shows the document menu. Text adapts to the card width. */
 @Composable
 private fun BookCard(book: Book, onOpen: () -> Unit) {
-    Card(onClick = onOpen) {
-        Box {
-            BookCover(book, Modifier.fillMaxWidth().aspectRatio(0.72f))
-            if (book.opened > 0) {
-                LinearProgressIndicator({ book.progress }, Modifier.fillMaxWidth().align(Alignment.BottomCenter))
+    var menu by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
+    BoxWithConstraints {
+        val compact = maxWidth < 120.dp
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.combinedClickable(
+                    onClick = onOpen,
+                    onLongClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); menu = true },
+                    onLongClickLabel = "Document options",
+                ),
+            ) {
+                Box {
+                    BookCover(book, Modifier.fillMaxWidth().aspectRatio(0.72f))
+                    if (book.favorite) {
+                        Icon(
+                            Icons.Default.Star, "Favorite",
+                            tint = Color(0xFFFFB300),
+                            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
+                                .background(Color.Black.copy(alpha = 0.45f), CircleShape).padding(3.dp).size(14.dp),
+                        )
+                    }
+                    if (book.opened > 0) {
+                        LinearProgressIndicator({ book.progress }, Modifier.fillMaxWidth().align(Alignment.BottomCenter), drawStopIndicator = {})
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(horizontal = if (compact) 6.dp else 10.dp, vertical = if (compact) 6.dp else 8.dp)) {
+                        Text(
+                            book.title,
+                            maxLines = 2,
+                            minLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            when {
+                                book.opened > 0 -> "${(book.progress * 100).roundToInt()}%" + if (compact) "" else " read"
+                                book.pages > 0 -> if (compact) "${book.pages} p." else "${book.pages} pages"
+                                else -> "PDF"
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                    Box {
+                        if (!compact) IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
+                        BookMenu(book, menu, onExpandedChange = { menu = it }, withFavorite = true)
+                    }
+                }
             }
-        }
-        Row(Modifier.padding(start = 10.dp, top = 6.dp), verticalAlignment = Alignment.Top) {
-            Column(Modifier.weight(1f).padding(top = 4.dp)) {
-                Text(book.title, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
-                Text(
-                    if (book.opened > 0) "${(book.progress * 100).roundToInt()}% read" else book.pages.takeIf { it > 0 }?.let { "$it pages" } ?: "PDF",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
-            }
-            BookMenu(book, withFavorite = true)
         }
     }
 }
@@ -391,35 +479,32 @@ private fun FavoriteButton(book: Book) {
     }
 }
 
-/** Overflow menu with every per-book action, plus the dialogs it opens. */
+/** Menu with every per-book action, plus the dialogs it opens. Anchors to the enclosing Box. */
 @Composable
-private fun BookMenu(book: Book, withFavorite: Boolean = false) {
+private fun BookMenu(book: Book, expanded: Boolean, onExpandedChange: (Boolean) -> Unit, withFavorite: Boolean = false) {
     val context = LocalContext.current
     val library = context.app.library
-    var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<String?>(null) }
-    Box {
-        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
-        DropdownMenu(menu, onDismissRequest = { menu = false }) {
-            if (withFavorite) DropdownMenuItem(
-                { Text(if (book.favorite) "Remove from favorites" else "Add to favorites") },
-                onClick = { menu = false; library.update(book.uri) { it.copy(favorite = !it.favorite) } },
+    val close = { onExpandedChange(false) }
+    DropdownMenu(expanded, onDismissRequest = close) {
+        if (withFavorite) DropdownMenuItem(
+            { Text(if (book.favorite) "Remove from favorites" else "Add to favorites") },
+            onClick = { close(); library.update(book.uri) { it.copy(favorite = !it.favorite) } },
+        )
+        for (s in Status.entries) {
+            if (s == book.status) continue
+            DropdownMenuItem(
+                { Text(if (s == Status.NONE) "Clear status" else "Mark as ${s.label.lowercase()}") },
+                onClick = { close(); library.update(book.uri) { it.copy(status = s) } },
             )
-            for (s in Status.entries) {
-                if (s == book.status) continue
-                DropdownMenuItem(
-                    { Text(if (s == Status.NONE) "Clear status" else "Mark as ${s.label.lowercase()}") },
-                    onClick = { menu = false; library.update(book.uri) { it.copy(status = s) } },
-                )
-            }
-            if (book.page > 0) DropdownMenuItem({ Text("Reset progress") }, onClick = {
-                menu = false; library.update(book.uri) { it.copy(page = 0) }
-            })
-            DropdownMenuItem({ Text("Collections…") }, onClick = { menu = false; dialog = "collections" })
-            DropdownMenuItem({ Text("Share") }, onClick = { menu = false; share(context, book.uri) })
-            DropdownMenuItem({ Text("Document info") }, onClick = { menu = false; dialog = "info" })
-            DropdownMenuItem({ Text("Remove from library") }, onClick = { menu = false; dialog = "remove" })
         }
+        if (book.page > 0) DropdownMenuItem({ Text("Reset progress") }, onClick = {
+            close(); library.update(book.uri) { it.copy(page = 0) }
+        })
+        DropdownMenuItem({ Text("Collections…") }, onClick = { close(); dialog = "collections" })
+        DropdownMenuItem({ Text("Share") }, onClick = { close(); share(context, book.uri) })
+        DropdownMenuItem({ Text("Document info") }, onClick = { close(); dialog = "info" })
+        DropdownMenuItem({ Text("Remove from library") }, onClick = { close(); dialog = "remove" })
     }
 
     when (dialog) {
